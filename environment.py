@@ -9,28 +9,25 @@ class AGVEnvironment(gym.Env):
         super(AGVEnvironment, self).__init__()
 
         # Field dimensions (15x15 meters)
-        self.field_size = 15  # The field is 15x15 meters
-        self.resolution = 50  # 50 pixels per meter for rendering
-        self.window_size = self.field_size * self.resolution  # Size of the Pygame window
+        self.field_size = 15
+        self.resolution = 50
+        self.window_size = self.field_size * self.resolution
 
         # AGV parameters
-        self.agv_length = 0.7  # Length of the AGV in meters
-        self.agv_width = 0.5  # Width of the AGV in meters
-        self.move_step = 0.002  # Forward movement per step in meters (1 cm)
-        self.turn_step = 0.2  # Rotation per step in degrees
+        self.agv_length = 0.7
+        self.agv_width = 0.5
+        self.move_step = 0.003
+        self.turn_step = 0.3
 
-        # Obstacles (positions in meters)
+        # Custom obstacles: Each obstacle has type, position, and size
         self.obstacles = [
-            (5, 5),  # Obstacle at (5, 5)
-            (10, 10),  # Obstacle at (10, 10)
-            (7, 8),  # Obstacle at (7, 8)
+            {"type": "circle", "position": (5, 5), "radius": 0.5},  # Circle obstacle
+            {"type": "rectangle", "position": (10, 10), "size": (1.0, 0.5)},  # Rectangle obstacle
+            {"type": "rectangle", "position": (7, 8), "size": (0.5, 0.5)},  # Rectangle obstacle
         ]
 
-        # Action space: 0 = move forward, 1 = turn left, 2 = turn right
+        # Action space and observation space
         self.action_space = gym.spaces.Discrete(3)
-
-        # Observation space: AGV's position (x, y, angle)
-        # x, y range from 0 to field_size, and angle from 0 to 360 degrees
         self.observation_space = gym.spaces.Box(
             low=np.array([0, 0, 0]),
             high=np.array([self.field_size, self.field_size, 360]),
@@ -38,26 +35,24 @@ class AGVEnvironment(gym.Env):
         )
 
         # Initial position and goal
-        self.start_pos = np.array([0.5, 7.5, 0])  # AGV starts at (7.5, 7.5), facing 0 degrees
-        self.goal_pos = np.array([14.0, 14.0])  # Goal is located at (14, 14)
-        self.agv_pos = self.start_pos.copy()  # AGV's current position and orientation
+        self.start_pos = np.array([0.5, 7.5, 0])
+        self.goal_pos = np.array([14.0, 14.0])
+        self.agv_pos = self.start_pos.copy()
 
-        # Pygame setup for rendering
+        # Pygame setup
         pygame.init()
         self.screen = pygame.display.set_mode((self.window_size, self.window_size))
         pygame.display.set_caption("AGV Environment")
         self.clock = pygame.time.Clock()
 
         # Colors for visualization
-        self.bg_color = (230, 230, 230)  # Background color: light grey
-        self.grid_color = (200, 200, 200)  # Grid color: grey
-        self.agv_color = (0, 0, 255)  # AGV color: blue
-        self.goal_color = (0, 255, 0)  # Goal color: green
+        self.bg_color = (230, 230, 230)
+        self.grid_color = (200, 200, 200)
+        self.agv_color = (0, 0, 255)
+        self.goal_color = (0, 255, 0)
+        self.obstacle_color = (255, 0, 0)
 
     def reset(self):
-        """
-        Reset the environment to the initial state.
-        """
         self.agv_pos = self.start_pos.copy()
         return self.agv_pos
 
@@ -71,6 +66,9 @@ class AGVEnvironment(gym.Env):
         Returns:
             tuple: (observation, reward, done, info)
         """
+        # Save the previous distance to the goal
+        previous_distance = np.linalg.norm(self.agv_pos[:2] - self.goal_pos)
+
         # Apply the action
         if action == 0:  # Move forward
             dx = self.move_step * math.cos(math.radians(self.agv_pos[2]))
@@ -88,29 +86,33 @@ class AGVEnvironment(gym.Env):
 
         # Check for collision with obstacles
         if self.check_collision():
-            reward = -10  # Penalize collision
+            reward = -1000  # Large penalty for collision
             done = True
             return self.agv_pos, reward, done, {}
 
+        # Calculate the current distance to the goal
+        current_distance = np.linalg.norm(self.agv_pos[:2] - self.goal_pos)
+
+        # Calculate distance-based reward/penalty
+        distance_reward = previous_distance - current_distance
+        if distance_reward > 0:
+            distance_reward = 0.1  # Small reward for moving closer
+        elif distance_reward < 0:
+            distance_reward = -0.1  # Small penalty for moving farther
+
         # Check if the AGV reached the goal
-        distance_to_goal = np.linalg.norm(self.agv_pos[:2] - self.goal_pos)
-        done = distance_to_goal < 0.1  # Goal reached if within 10 cm
-        reward = 10 if done else -0.01  # Reward for reaching the goal, small penalty otherwise
+        done = current_distance < 0.1  # Goal reached if within 10 cm
+        if done:
+            reward = 100  # Large reward for reaching the goal
+        else:
+            reward = distance_reward - 0.01  # Include small time penalty to encourage efficiency
 
         return self.agv_pos, reward, done, {}
 
     def check_collision(self):
-        """
-        Check if the AGV collides with any obstacle.
+        agv_x, agv_y, agv_angle = self.agv_pos
 
-        Returns:
-            bool: True if collision occurs, False otherwise.
-        """
-        agv_x = self.agv_pos[0]
-        agv_y = self.agv_pos[1]
-        agv_angle = self.agv_pos[2]
-
-        # Calculate AGV's corners based on its position and orientation
+        # Calculate AGV corners
         half_length = self.agv_length / 2
         half_width = self.agv_width / 2
         corners = [
@@ -127,31 +129,33 @@ class AGVEnvironment(gym.Env):
             for x, y in corners
         ]
 
-        # Check collision with obstacles
-        for obs_x, obs_y in self.obstacles:
-            for corner_x, corner_y in rotated_corners:
-                # Check if any corner is within the obstacle's radius
-                if math.dist((corner_x, corner_y), (obs_x, obs_y)) < 0.2:  # Adjust collision radius
-                    return True
+        # Check collision for each obstacle
+        for obstacle in self.obstacles:
+            if obstacle["type"] == "circle":
+                obs_x, obs_y = obstacle["position"]
+                radius = obstacle["radius"]
 
-            # Check if any part of the AGV rectangle intersects the obstacle's bounding circle
-            agv_center = np.array([agv_x, agv_y])
-            obstacle_center = np.array([obs_x, obs_y])
-            distance_to_obstacle = np.linalg.norm(agv_center - obstacle_center)
+                # Check if any corner is within the circle
+                for corner_x, corner_y in rotated_corners:
+                    if math.dist((corner_x, corner_y), (obs_x, obs_y)) <= radius:
+                        return True
 
-            # Effective AGV radius approximation for collision detection
-            effective_agv_radius = math.sqrt((half_length ** 2) + (half_width ** 2))
+            elif obstacle["type"] == "rectangle":
+                obs_x, obs_y = obstacle["position"]
+                width, height = obstacle["size"]
+                half_width, half_height = width / 2, height / 2
 
-            if distance_to_obstacle <= effective_agv_radius + 0.2:  # 20 cm obstacle radius
-                return True
+                # Check if any corner is within the rectangle
+                for corner_x, corner_y in rotated_corners:
+                    if (
+                        obs_x - half_width <= corner_x <= obs_x + half_width
+                        and obs_y - half_height <= corner_y <= obs_y + half_height
+                    ):
+                        return True
 
         return False
 
-
     def render(self, mode="human"):
-        """
-        Render the environment using Pygame.
-        """
         self.screen.fill(self.bg_color)
 
         # Draw grid
@@ -169,14 +173,29 @@ class AGVEnvironment(gym.Env):
         pygame.draw.rect(self.screen, self.goal_color, goal_rect)
 
         # Draw obstacles
-        for obs_x, obs_y in self.obstacles:
-            obs_rect = pygame.Rect(
-                int(obs_x * self.resolution) - 10,
-                int(obs_y * self.resolution) - 10,
-                20,
-                20,
-            )
-            pygame.draw.rect(self.screen, (255, 0, 0), obs_rect)  # Red for obstacles
+        for obstacle in self.obstacles:
+            if obstacle["type"] == "circle":
+                obs_x, obs_y = obstacle["position"]
+                radius = obstacle["radius"]
+                pygame.draw.circle(
+                    self.screen,
+                    self.obstacle_color,
+                    (int(obs_x * self.resolution), int(obs_y * self.resolution)),
+                    int(radius * self.resolution),
+                )
+            elif obstacle["type"] == "rectangle":
+                obs_x, obs_y = obstacle["position"]
+                width, height = obstacle["size"]
+                pygame.draw.rect(
+                    self.screen,
+                    self.obstacle_color,
+                    pygame.Rect(
+                        int((obs_x - width / 2) * self.resolution),
+                        int((obs_y - height / 2) * self.resolution),
+                        int(width * self.resolution),
+                        int(height * self.resolution),
+                    ),
+                )
 
         # Draw AGV
         agv_x = int(self.agv_pos[0] * self.resolution)
@@ -202,7 +221,4 @@ class AGVEnvironment(gym.Env):
         pygame.display.flip()
 
     def close(self):
-        """
-        Close the Pygame window.
-        """
         pygame.quit()
