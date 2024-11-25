@@ -11,13 +11,18 @@ class AGVEnvironment(gym.Env):
         # Field dimensions (15x15 meters)
         self.field_size = 15
         self.resolution = 50
-        self.window_size = self.field_size * self.resolution
+        self.window_size = int(self.field_size * self.resolution)
 
         # AGV parameters
         self.agv_length = 0.7
         self.agv_width = 0.5
-        self.move_step = 0.003
-        self.turn_step = 0.3
+        self.move_step = 0.05  # Increased for better movement
+        self.turn_step = 5.0   # Increased for smoother turning
+
+        # Sensor parameters
+        self.num_sensors = 5
+        self.sensor_angles = [-90, -45, 0, 45, 90]  # Relative angles in degrees
+        self.max_sensor_distance = 5.0  # Maximum sensor range in meters
 
         # Custom obstacles: Each obstacle has type, position, and size
         self.obstacles = [
@@ -29,8 +34,8 @@ class AGVEnvironment(gym.Env):
         # Action space and observation space
         self.action_space = gym.spaces.Discrete(3)
         self.observation_space = gym.spaces.Box(
-            low=np.array([0, 0, 0]),
-            high=np.array([self.field_size, self.field_size, 360]),
+            low=np.array([0, 0, 0] + [0]*self.num_sensors),
+            high=np.array([self.field_size, self.field_size, 360] + [self.max_sensor_distance]*self.num_sensors),
             dtype=np.float32,
         )
 
@@ -51,10 +56,13 @@ class AGVEnvironment(gym.Env):
         self.agv_color = (0, 0, 255)
         self.goal_color = (0, 255, 0)
         self.obstacle_color = (255, 0, 0)
+        self.sensor_color = (255, 165, 0)
 
     def reset(self):
         self.agv_pos = self.start_pos.copy()
-        return self.agv_pos
+        sensor_readings = self.get_sensor_readings()
+        observation = np.concatenate((self.agv_pos, sensor_readings))
+        return observation
 
     def step(self, action):
         """
@@ -86,9 +94,11 @@ class AGVEnvironment(gym.Env):
 
         # Check for collision with obstacles
         if self.check_collision():
-            reward = -1000  # Large penalty for collision
+            reward = -100  # Large penalty for collision
             done = True
-            return self.agv_pos, reward, done, {}
+            sensor_readings = self.get_sensor_readings()
+            observation = np.concatenate((self.agv_pos, sensor_readings))
+            return observation, reward, done, {}
 
         # Calculate the current distance to the goal
         current_distance = np.linalg.norm(self.agv_pos[:2] - self.goal_pos)
@@ -96,18 +106,75 @@ class AGVEnvironment(gym.Env):
         # Calculate distance-based reward/penalty
         distance_reward = previous_distance - current_distance
         if distance_reward > 0:
-            distance_reward = 0.1  # Small reward for moving closer
+            distance_reward = 1.0  # Reward for moving closer
         elif distance_reward < 0:
-            distance_reward = -0.1  # Small penalty for moving farther
+            distance_reward = -1.0  # Penalty for moving farther
+        else:
+            distance_reward = 0
 
         # Check if the AGV reached the goal
-        done = current_distance < 0.1  # Goal reached if within 10 cm
+        done = current_distance < 0.5  # Goal reached if within 0.5 meters
         if done:
             reward = 100  # Large reward for reaching the goal
         else:
-            reward = distance_reward - 0.01  # Include small time penalty to encourage efficiency
+            # Small time penalty to encourage efficiency
+            reward = distance_reward - 0.1
 
-        return self.agv_pos, reward, done, {}
+        # Get sensor readings
+        sensor_readings = self.get_sensor_readings()
+
+        # Return observation
+        observation = np.concatenate((self.agv_pos, sensor_readings))
+        return observation, reward, done, {}
+
+    def get_sensor_readings(self):
+        agv_x, agv_y, agv_angle = self.agv_pos
+        sensor_readings = []
+
+        for angle in self.sensor_angles:
+            # Convert sensor angle to global angle
+            sensor_angle = (agv_angle + angle) % 360
+            sensor_rad = math.radians(sensor_angle)
+
+            # Initialize distance
+            distance = self.max_sensor_distance
+
+            # Step along the sensor line
+            for d in np.linspace(0, self.max_sensor_distance, num=100):
+                test_x = agv_x + d * math.cos(sensor_rad)
+                test_y = agv_y + d * math.sin(sensor_rad)
+
+                # Check if out of bounds
+                if test_x < 0 or test_x > self.field_size or test_y < 0 or test_y > self.field_size:
+                    distance = d
+                    break
+
+                # Check collision with obstacles
+                collision = False
+                for obstacle in self.obstacles:
+                    if obstacle["type"] == "circle":
+                        obs_x, obs_y = obstacle["position"]
+                        radius = obstacle["radius"]
+                        if math.hypot(test_x - obs_x, test_y - obs_y) <= radius:
+                            collision = True
+                            break
+                    elif obstacle["type"] == "rectangle":
+                        obs_x, obs_y = obstacle["position"]
+                        width, height = obstacle["size"]
+                        half_width, half_height = width / 2, height / 2
+                        if (
+                            obs_x - half_width <= test_x <= obs_x + half_width
+                            and obs_y - half_height <= test_y <= obs_y + half_height
+                        ):
+                            collision = True
+                            break
+                if collision:
+                    distance = d
+                    break
+
+            sensor_readings.append(distance)
+
+        return np.array(sensor_readings, dtype=np.float32)
 
     def check_collision(self):
         agv_x, agv_y, agv_angle = self.agv_pos
@@ -137,19 +204,19 @@ class AGVEnvironment(gym.Env):
 
                 # Check if any corner is within the circle
                 for corner_x, corner_y in rotated_corners:
-                    if math.dist((corner_x, corner_y), (obs_x, obs_y)) <= radius:
+                    if math.hypot(corner_x - obs_x, corner_y - obs_y) <= radius:
                         return True
 
             elif obstacle["type"] == "rectangle":
                 obs_x, obs_y = obstacle["position"]
                 width, height = obstacle["size"]
-                half_width, half_height = width / 2, height / 2
+                half_width_obs, half_height_obs = width / 2, height / 2
 
                 # Check if any corner is within the rectangle
                 for corner_x, corner_y in rotated_corners:
                     if (
-                        obs_x - half_width <= corner_x <= obs_x + half_width
-                        and obs_y - half_height <= corner_y <= obs_y + half_height
+                        obs_x - half_width_obs <= corner_x <= obs_x + half_width_obs
+                        and obs_y - half_height_obs <= corner_y <= obs_y + half_height_obs
                     ):
                         return True
 
@@ -218,6 +285,21 @@ class AGVEnvironment(gym.Env):
             for x, y in corners
         ]
         pygame.draw.polygon(self.screen, self.agv_color, rotated_corners)
+
+        # Draw sensors
+        sensor_readings = self.get_sensor_readings()
+        for angle, distance in zip(self.sensor_angles, sensor_readings):
+            sensor_angle = (agv_angle + angle) % 360
+            end_x = agv_x + distance * self.resolution * math.cos(math.radians(sensor_angle))
+            end_y = agv_y + distance * self.resolution * math.sin(math.radians(sensor_angle))
+            pygame.draw.line(
+                self.screen,
+                self.sensor_color,
+                (agv_x, agv_y),
+                (end_x, end_y),
+                1,
+            )
+
         pygame.display.flip()
 
     def close(self):
