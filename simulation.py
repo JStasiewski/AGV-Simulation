@@ -4,7 +4,7 @@ import time
 
 def simulate_model():
     env = AGVEnvironment()
-    model = PPO.load("ppo_agv_model")
+    model = PPO.load("ppo_agv_model", device="cpu")
     obs = env.reset()
 
     done = False

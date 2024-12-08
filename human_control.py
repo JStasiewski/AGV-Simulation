@@ -80,7 +80,7 @@ def human_control():
                 else:
                     print("Collision detected!")
                 running = False
-        time.sleep(0.01)
+        time.sleep(0.05)
 
     env.close()
     print("Simulation ended.")
