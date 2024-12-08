@@ -1,5 +1,6 @@
 from stable_baselines3 import PPO
 from environment import AGVEnvironment
+import time
 
 def simulate_model():
     env = AGVEnvironment()
@@ -11,6 +12,8 @@ def simulate_model():
         action, _ = model.predict(obs)
         obs, reward, done, _ = env.step(action)
         env.render()
+        time.sleep(0.05)
+
 
     print("Simulation complete. Goal reached!")
     env.close()
