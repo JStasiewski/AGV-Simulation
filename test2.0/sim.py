@@ -1,10 +1,10 @@
 from stable_baselines3 import PPO
-from environment import AGVEnvironment
+from env import AGVLineFollowingEnvironment
 import time
 
 def simulate_model():
-    env = AGVEnvironment()
-    model = PPO.load("ppo_agv_model", device="cpu")
+    env = AGVLineFollowingEnvironment()
+    model = PPO.load("ppo_line_follow_model", device="cpu")
     obs = env.reset()
 
     done = False
@@ -12,10 +12,9 @@ def simulate_model():
         action, _ = model.predict(obs)
         obs, reward, done, _ = env.step(action)
         env.render()
-        time.sleep(0.2)
+        time.sleep(0.02)
 
-
-    print("Simulation complete. Goal reached!")
+    print("Simulation complete. Goal reached or episode ended.")
     env.close()
 
 if __name__ == "__main__":

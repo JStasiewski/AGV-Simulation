@@ -24,9 +24,8 @@ class AGVEnvironment(gym.Env):
         self.num_move_actions = len(self.move_steps)       # Forward movements
         self.action_space = gym.spaces.Discrete(self.num_turn_actions + self.num_move_actions)
 
-        # Expanded sensor angles to get better view in front
-        # Front area: -10, 0, 10 degrees. This will help determine if the path ahead is clear.
-        self.sensor_angles = [-90, -45, -10, 0, 10, 45, 90]
+        # Expanded sensor angles
+        self.sensor_angles = [-30, -20, -10, 0, 10, 20, 30]
         self.num_sensors = len(self.sensor_angles)
         self.max_sensor_distance = 5.0  # Maximum sensor range in meters
 
@@ -42,6 +41,7 @@ class AGVEnvironment(gym.Env):
         # Initial position and goal
         self.start_pos = np.array([0.5, 7.5, 0])
         self.goal_pos = np.array([14.0, 14.0])
+        self.goal_radius = 0.5  # If sensor line gets within 0.5m of goal, we consider goal seen
         self.agv_pos = self.start_pos.copy()
 
         self.turn_only_steps = 0
@@ -85,7 +85,7 @@ class AGVEnvironment(gym.Env):
                 "size": (width, height)
             })
 
-        sensor_readings = self.get_sensor_readings()
+        sensor_readings, _ = self.get_sensor_readings()
         observation = np.concatenate((self.agv_pos, sensor_readings))
         self.turn_only_steps = 0
         return observation
@@ -126,8 +126,8 @@ class AGVEnvironment(gym.Env):
         # Check goal
         done = current_distance < 0.5
 
-        # Get sensor readings
-        sensor_readings = self.get_sensor_readings()
+        # Get sensor readings and whether goal is seen
+        sensor_readings, goal_seen = self.get_sensor_readings()
 
         # Identify front sensors for checking obstacles ahead (-10, 0, 10)
         front_sensor_indices = [self.sensor_angles.index(a) for a in [-10, 0, 10]]
@@ -162,7 +162,7 @@ class AGVEnvironment(gym.Env):
             # Reward getting farther from obstacles
             if obstacle_distance_improvement > 0:
                 # Encourage getting away from obstacles
-                reward += 2.0 * obstacle_distance_improvement * (1 + max(0, distance_improvement))
+                reward += 2.0 * obstacle_distance_improvement
             else:
                 # Penalize getting closer to obstacles
                 closeness_penalty_factor = 1.0
@@ -176,7 +176,7 @@ class AGVEnvironment(gym.Env):
             if current_obstacle_distance < 1.0:
                 reward -= (1.0 - current_obstacle_distance) * 0.5
 
-            # Small step penalty to discourage random moves without purpose
+            # Small step penalty to discourage random moves
             reward -= 0.005
 
             # Penalty for too many turns in place
@@ -187,21 +187,37 @@ class AGVEnvironment(gym.Env):
             if chosen_step > 0 and distance_improvement > 0 and min_front_distance > 2.0:
                 reward += 0.1  # Encourage fast forward motion in clear path
 
+            # **New Logic: Reward if goal is visible via sensor**
+            if goal_seen:
+                # If the goal is within sensor range (0.5m radius from line) with no obstacles in between
+                # Give a big reward. This encourages line-of-sight approach.
+                reward += 50.0
+
         observation = np.concatenate((self.agv_pos, sensor_readings))
         return observation, reward, done, {}
 
     def get_sensor_readings(self):
         agv_x, agv_y, agv_angle = self.agv_pos
         sensor_readings = []
+        goal_seen = False
 
         for angle in self.sensor_angles:
             sensor_angle = (agv_angle + angle) % 360
             sensor_rad = math.radians(sensor_angle)
 
             distance = self.max_sensor_distance
+            # Check along the line of sensor
             for d in np.linspace(0, self.max_sensor_distance, num=100):
                 test_x = agv_x + d * math.cos(sensor_rad)
                 test_y = agv_y + d * math.sin(sensor_rad)
+
+                # Check if goal is within 0.5m of this line point
+                dist_to_goal = math.hypot(test_x - self.goal_pos[0], test_y - self.goal_pos[1])
+                if dist_to_goal < self.goal_radius:
+                    # We see the goal on this sensor line of sight
+                    distance = d
+                    goal_seen = True
+                    break
 
                 # Check bounds
                 if test_x < 0 or test_x > self.field_size or test_y < 0 or test_y > self.field_size:
@@ -227,7 +243,7 @@ class AGVEnvironment(gym.Env):
 
             sensor_readings.append(distance)
 
-        return np.array(sensor_readings, dtype=np.float32)
+        return np.array(sensor_readings, dtype=np.float32), goal_seen
 
     def check_collision(self):
         agv_x, agv_y, agv_angle = self.agv_pos
@@ -336,7 +352,7 @@ class AGVEnvironment(gym.Env):
         pygame.draw.polygon(self.screen, self.agv_color, rotated_corners)
 
         # Draw sensors
-        sensor_readings = self.get_sensor_readings()
+        sensor_readings, _ = self.get_sensor_readings()
         for angle, distance in zip(self.sensor_angles, sensor_readings):
             sensor_angle = (agv_angle + angle) % 360
             end_x = agv_x + distance * self.resolution * math.cos(math.radians(sensor_angle))
