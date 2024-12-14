@@ -1,7 +1,7 @@
 import os
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras import layers, models, optimizers
+from tensorflow.keras import layers, models, optimizers # type: ignore
 from environment import AGVEnvironment
 
 # Build the neural network model
