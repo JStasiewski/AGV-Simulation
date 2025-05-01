@@ -1,7 +1,9 @@
 import os
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras import layers, models, optimizers # type: ignore
+from tensorflow.keras import layers, models, optimizers  # type: ignore
+import matplotlib.pyplot as plt
+
 from environment import AGVEnvironment
 
 # Build the neural network model
@@ -33,13 +35,19 @@ def main():
     epsilon = 1.0
     epsilon_decay = 0.995
     epsilon_min = 0.01
-    reward_history = []  # To store total rewards per episode
+    
+    # Lists to store history
+    reward_history = []       # Total reward per episode
+    mean_reward_history = []  # Moving average (mean reward)
+    epsilon_history = []      # Epsilon per episode
+    
     mean_reward_window = 50  # Window size for mean reward
     
     for ep in range(episodes):
         obs = env.reset()
         total_reward = 0
         done = False
+        
         while not done:
             # Epsilon-greedy action selection
             if np.random.rand() < epsilon:
@@ -58,7 +66,7 @@ def main():
                 next_q = model.predict(next_obs.reshape(1, -1), verbose=0)[0]
                 target += gamma * np.max(next_q)
             
-            # Update Q-values
+            # Update Q-values (target for the chosen action)
             current_q = model.predict(obs.reshape(1, -1), verbose=0)
             current_q[0][action] = target
             
@@ -79,14 +87,48 @@ def main():
             mean_reward = np.mean(reward_history[-mean_reward_window:])
         else:
             mean_reward = np.mean(reward_history)
+        mean_reward_history.append(mean_reward)
+        
+        # Store epsilon for plotting
+        epsilon_history.append(epsilon)
         
         # Print progress
-        print(f"Episode: {ep + 1}, Total Reward: {total_reward}, Mean Reward: {mean_reward:.2f}, Epsilon: {epsilon:.2f}")
+        print(f"Episode: {ep + 1}, "
+              f"Total Reward: {total_reward}, "
+              f"Mean Reward: {mean_reward:.2f}, "
+              f"Epsilon: {epsilon:.2f}")
     
     # Save the model after training
     model.save(model_path)
     print(f"Model saved to {model_path}")
+    
+    # Close the environment
     env.close()
+    
+    # ---------------------------
+    # Plotting the training stats
+    # ---------------------------
+    plt.figure(figsize=(14, 5))
+    
+    # Plot total reward per episode
+    plt.subplot(1, 2, 1)
+    plt.plot(range(1, episodes + 1), reward_history, label='Total Reward')
+    plt.plot(range(1, episodes + 1), mean_reward_history, label=f'Mean Reward (window={mean_reward_window})')
+    plt.xlabel('Episode')
+    plt.ylabel('Reward')
+    plt.title('Reward History')
+    plt.legend()
+    
+    # Plot epsilon decay
+    plt.subplot(1, 2, 2)
+    plt.plot(range(1, episodes + 1), epsilon_history, label='Epsilon')
+    plt.xlabel('Episode')
+    plt.ylabel('Epsilon')
+    plt.title('Epsilon Decay')
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.show()
 
 if __name__ == "__main__":
     main()

@@ -7,10 +7,10 @@ class AGVEnvironment:
         self, 
         width=800, 
         height=800, 
-        track_width=60,
-        segment_length=100,
+        track_width=100,
+        segment_length=80,
         num_segments=8,
-        angle_variance=1,  # ~30 degrees max turn each segment
+        angle_variance=1.5,  # ~30 degrees max turn each segment
         goal_reward=100.0
     ):
         self.width = width
@@ -36,16 +36,19 @@ class AGVEnvironment:
         self.batch = pyglet.graphics.Batch()
 
         # Car
-        self.car_size = 10  # Size of the car
+        self.car_size = 50  # Size of the car
         self.car_color = (255, 0, 0)
         self.car = pyglet.shapes.Rectangle(
-            x=self.width // 2 - self.car_size // 2,  # Center horizontally
-            y=50 - self.car_size // 2,              # Center vertically at the track start
+            x=self.width // 2 - self.car_size // 2,
+            y=50 - self.car_size // 2,
             width=self.car_size,
             height=self.car_size,
             color=self.car_color,
             batch=self.batch
         )
+        # pivot point for rotation = center of the rect:
+        self.car.anchor_x = self.car_size // 2
+        self.car.anchor_y = self.car_size // 2
 
         
         # Sensors 
@@ -239,8 +242,8 @@ class AGVEnvironment:
 
     def reset(self):
         self.state = np.array([self.track[0][0], self.track[0][1], 0.0, 0.0], dtype=np.float32)
-        self.car.x = self.state[0] - self.car_size // 2
-        self.car.y = self.state[1] - self.car_size // 2
+        self.car.x = self.state[0]
+        self.car.y = self.state[1]
         self.car.rotation = self.state[2] * (180.0 / math.pi)
 
         self.left_track, self.right_track = self._compute_track_boundaries()
@@ -345,7 +348,7 @@ class AGVEnvironment:
         self.state_prev = self.state.copy()
 
         # Check goal condition
-        goal_threshold = 10.0
+        goal_threshold = 50.0
         dx = x - self.goal_x
         dy = y - self.goal_y
         goal_dist = math.sqrt(dx*dx + dy*dy)
@@ -390,8 +393,8 @@ class AGVEnvironment:
 
     def render(self):
         self.window.clear()
-        self.car.x = self.state[0] - self.car_size // 2
-        self.car.y = self.state[1] - self.car_size // 2
+        self.car.x = self.state[0]
+        self.car.y = self.state[1]
         self.car.rotation = self.state[2] * (180.0 / math.pi)
         self.batch.draw()
 
