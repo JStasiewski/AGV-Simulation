@@ -8,11 +8,17 @@ class AGVEnvironment:
         width=800, 
         height=800, 
         track_width=100,
-        segment_length=80,
+        segment_length=100,
         num_segments=8,
         angle_variance=1.5,  # ~30 degrees max turn each segment
         goal_reward=100.0
     ):
+        self.max_obstacles_per_segment = 3
+        self.max_obstacle_size = 15
+        self.obstacles = []  # list of dicts {x,y,r}
+        self.obstacle_shapes = []
+
+        
         self.width = width
         self.height = height
         self.track_width = track_width
@@ -28,6 +34,12 @@ class AGVEnvironment:
         # Generate a smooth track inside the screen without large immediate turns
         self.track = self._generate_track()
 
+        # compute boundaries
+        self.left_track, self.right_track = self._compute_track_boundaries()
+
+        # now place obstacles once
+        self._generate_obstacles()
+
         # The goal is at the end of the track
         self.goal_x, self.goal_y = self.track[-1]
 
@@ -36,19 +48,20 @@ class AGVEnvironment:
         self.batch = pyglet.graphics.Batch()
 
         # Car
-        self.car_size = 50  # Size of the car
+        self.car_size_width = 20  # Size of the car
+        self.car_size_height = 30
         self.car_color = (255, 0, 0)
         self.car = pyglet.shapes.Rectangle(
-            x=self.width // 2 - self.car_size // 2,
-            y=50 - self.car_size // 2,
-            width=self.car_size,
-            height=self.car_size,
+            x=self.width // 2 - self.car_size_width // 2,
+            y=50 - self.car_size_height // 2,
+            width=self.car_size_width,
+            height=self.car_size_height,
             color=self.car_color,
             batch=self.batch
         )
         # pivot point for rotation = center of the rect:
-        self.car.anchor_x = self.car_size // 2
-        self.car.anchor_y = self.car_size // 2
+        self.car.anchor_x = self.car_size_width // 2
+        self.car.anchor_y = self.car_size_height // 2
 
         
         # Sensors 
@@ -123,50 +136,97 @@ class AGVEnvironment:
 
         return track
     
+    def _generate_obstacles(self):
+        """Populate self.obstacles once, sticking them to segments 1..N-2."""
+        self.obstacles.clear()
+        for i in range(1, len(self.track)-1):
+            x1,y1 = self.track[i]
+            x2,y2 = self.track[i+1]
+            dx, dy = x2-x1, y2-y1
+            L = math.hypot(dx,dy)
+            ux, uy = dx/L, dy/L
+            px, py = -uy, ux
+
+            n_obs = np.random.randint(0, self.max_obstacles_per_segment+1)
+            for _ in range(n_obs):
+                t = np.random.rand()
+                lateral = (np.random.rand()*2 - 1) * (self.track_width/2 - self.max_obstacle_size - 5)
+                ox = x1 + ux*t*L + px*lateral
+                oy = y1 + uy*t*L + py*lateral
+
+                w = np.random.uniform(10, self.max_obstacle_size)
+                h = np.random.uniform(10, self.max_obstacle_size)
+
+                self.obstacles.append({'x':ox, 'y':oy, 'w':w, 'h':h})
+    
     def _compute_sensor_distances(self):
         car_x, car_y, car_angle, _ = self.state
+
+        # origin at rear axle
+        ox = car_x - math.sin(car_angle) * (self.car_size_height / 2)
+        oy = car_y - math.cos(car_angle) * (self.car_size_height / 2)
+
         distances = []
         intersections = []
 
         for angle_offset in self.sensor_angles:
-            # Compute the sensor's angle relative to the car
             sensor_angle = car_angle + angle_offset
-            
-            # Calculate the sensor's end point (maximum range)
-            sensor_x2 = car_x + math.sin(sensor_angle) * self.sensor_range
-            sensor_y2 = car_y + math.cos(sensor_angle) * self.sensor_range
+            dx = math.sin(sensor_angle)
+            dy = math.cos(sensor_angle)
 
-            min_distance = self.sensor_range  # Start with max range
-            closest_point = None
+            min_dist = self.sensor_range
+            closest_pt = None
 
-            # Check intersection with all track boundaries
-            for i in range(len(self.left_track) - 1):
-                # Left boundary segment
-                x1, y1 = self.left_track[i]
-                x2, y2 = self.left_track[i + 1]
-                if self._lines_intersect(car_x, car_y, sensor_x2, sensor_y2, x1, y1, x2, y2):
-                    intersect_x, intersect_y = self._line_intersection_point(
-                        car_x, car_y, sensor_x2, sensor_y2, x1, y1, x2, y2
-                    )
-                    distance = math.sqrt((intersect_x - car_x) ** 2 + (intersect_y - car_y) ** 2)
-                    if distance < min_distance:
-                        min_distance = distance
-                        closest_point = (intersect_x, intersect_y)
+            # 1) check against track boundaries
+            for boundary in (self.left_track, self.right_track):
+                x_end = ox + dx * self.sensor_range
+                y_end = oy + dy * self.sensor_range
+                for i in range(len(boundary) - 1):
+                    x1, y1 = boundary[i]
+                    x2, y2 = boundary[i + 1]
+                    if self._lines_intersect(ox, oy, x_end, y_end, x1, y1, x2, y2):
+                        pt = self._line_intersection_point(ox, oy, x_end, y_end, x1, y1, x2, y2)
+                        if pt:
+                            d = math.hypot(pt[0] - ox, pt[1] - oy)
+                            if d < min_dist:
+                                min_dist = d
+                                closest_pt = pt
 
-                # Right boundary segment
-                x1, y1 = self.right_track[i]
-                x2, y2 = self.right_track[i + 1]
-                if self._lines_intersect(car_x, car_y, sensor_x2, sensor_y2, x1, y1, x2, y2):
-                    intersect_x, intersect_y = self._line_intersection_point(
-                        car_x, car_y, sensor_x2, sensor_y2, x1, y1, x2, y2
-                    )
-                    distance = math.sqrt((intersect_x - car_x) ** 2 + (intersect_y - car_y) ** 2)
-                    if distance < min_distance:
-                        min_distance = distance
-                        closest_point = (intersect_x, intersect_y)
+            # 2) check against each obstacle (AABB slab method)
+            for obs in self.obstacles:
+                # obstacle bounds
+                xmin = obs['x'] - obs['w']/2
+                xmax = obs['x'] + obs['w']/2
+                ymin = obs['y'] - obs['h']/2
+                ymax = obs['y'] + obs['h']/2
 
-            distances.append(min_distance)
-            intersections.append(closest_point)  # Store the closest intersection point
+                # compute t parameters for x‐slab
+                if abs(dx) < 1e-6:
+                    tx_min, tx_max = -math.inf, math.inf
+                else:
+                    tx1 = (xmin - ox) / dx
+                    tx2 = (xmax - ox) / dx
+                    tx_min, tx_max = min(tx1, tx2), max(tx1, tx2)
+
+                # compute t parameters for y‐slab
+                if abs(dy) < 1e-6:
+                    ty_min, ty_max = -math.inf, math.inf
+                else:
+                    ty1 = (ymin - oy) / dy
+                    ty2 = (ymax - oy) / dy
+                    ty_min, ty_max = min(ty1, ty2), max(ty1, ty2)
+
+                # entry/exit along ray
+                t_enter = max(tx_min, ty_min)
+                t_exit  = min(tx_max, ty_max)
+
+                # if it hits and is closer than current min_dist
+                if t_exit >= max(t_enter, 0) and 0 <= t_enter <= min_dist:
+                    min_dist = t_enter
+                    closest_pt = (ox + dx * t_enter, oy + dy * t_enter)
+
+            distances.append(min_dist)
+            intersections.append(closest_pt)
 
         return distances, intersections
 
@@ -239,6 +299,91 @@ class AGVEnvironment:
                 right_points.append((rwx2, rwy2))
 
         return left_points, right_points
+    
+    def _get_car_corners(self):
+        """
+        Returns the 4 corners of the car rectangle (in world coords),
+        in order [bottom-left, bottom-right, top-right, top-left].
+        """
+        cx, cy, angle, _ = self.state
+        hw = self.car_size_width / 2.0
+        hh = self.car_size_height / 2.0
+
+        # local coords of corners, relative to center
+        local = [(-hw, -hh), ( hw, -hh), ( hw,  hh), (-hw,  hh)]
+        world = []
+        sa, ca = math.sin(angle), math.cos(angle)
+        for lx, ly in local:
+            x = cx + lx * ca - ly * sa
+            y = cy + lx * sa + ly * ca
+            world.append((x, y))
+        return world
+
+    def _check_rectangle_collision(self):
+        # get the corners and build the 4 edges
+        corners = self._get_car_corners()
+        edges = [ (corners[i], corners[(i+1)%4]) for i in range(4) ]
+
+        # check against every wall segment
+        for (x1, y1), (x2, y2) in edges:
+            for track in (self.left_track, self.right_track):
+                for i in range(len(track)-1):
+                    x3, y3 = track[i]
+                    x4, y4 = track[i+1]
+                    if self._lines_intersect(x1, y1, x2, y2, x3, y3, x4, y4):
+                        return True
+        return False
+    
+    def _check_obstacle_collision(self):
+        """
+        Returns True if the oriented car rectangle intersects
+        any axis-aligned obstacle rectangle in self.obstacles.
+        """
+        # 1) Car corners in world coords
+        car_corners = self._get_car_corners()  # [(x0,y0),…,(x3,y3)]
+
+        # 2) Build projection axes:
+        #    - 2 from car: its local x & y directions
+        #    - 2 from obstacles: world X and world Y
+        # car‐axis 1 = edge from corner0→corner1
+        e1 = np.subtract(car_corners[1], car_corners[0])
+        e2 = np.subtract(car_corners[3], car_corners[0])
+        axes = []
+        for e in (e1, e2):
+            norm = np.linalg.norm(e)
+            if norm > 0:
+                axes.append(e / norm)
+        axes.append(np.array([1.0, 0.0]))
+        axes.append(np.array([0.0, 1.0]))
+
+        # 3) For each obstacle
+        for obs in self.obstacles:
+            ox, oy, w, h = obs['x'], obs['y'], obs['w'], obs['h']
+            hw, hh = w/2, h/2
+            # obstacle corners (axis-aligned)
+            obs_corners = [
+                (ox - hw, oy - hh),
+                (ox + hw, oy - hh),
+                (ox + hw, oy + hh),
+                (ox - hw, oy + hh),
+            ]
+
+            # 4) SAT: if any axis separates, no collision
+            overlap = True
+            for axis in axes:
+                # project car
+                proj_car = [axis[0]*x + axis[1]*y for (x,y) in car_corners]
+                min_c, max_c = min(proj_car), max(proj_car)
+                # project obstacle
+                proj_obs = [axis[0]*x + axis[1]*y for (x,y) in obs_corners]
+                min_o, max_o = min(proj_obs), max(proj_obs)
+                if max_c < min_o or max_o < min_c:
+                    overlap = False
+                    break
+            if overlap:
+                return True
+
+        return False
 
     def reset(self):
         self.state = np.array([self.track[0][0], self.track[0][1], 0.0, 0.0], dtype=np.float32)
@@ -300,7 +445,7 @@ class AGVEnvironment:
         return self._get_observation()
 
     def step(self, action):
-        forward_speed = 5.0
+        forward_speed = 1.0
         turn_speed = 0.1
 
         self.sensors = self._compute_sensor_distances()
@@ -359,9 +504,13 @@ class AGVEnvironment:
             reward += self.goal_reward
             # print("Goal reached")
             done = True
-        elif not self._within_track(x, y):
+        elif self._check_rectangle_collision():
+            # rectangle has hit a wall
             reward = -50.0
-            # print("Off track")
+            done = True
+        # now check your obstacles
+        elif not done and self._check_obstacle_collision():
+            reward = -50.0
             done = True
 
         obs = self._get_observation()
@@ -393,10 +542,16 @@ class AGVEnvironment:
 
     def render(self):
         self.window.clear()
+
         self.car.x = self.state[0]
         self.car.y = self.state[1]
         self.car.rotation = self.state[2] * (180.0 / math.pi)
-        self.batch.draw()
+
+        for shape in self.obstacle_shapes:
+            shape.delete()
+        self.obstacle_shapes.clear()
+        self.sensor_lines.clear()
+        self.sensor_circles.clear()
 
         # Clear old sensor lines and circles
         self.sensor_lines.clear()
@@ -404,17 +559,33 @@ class AGVEnvironment:
 
         # Draw sensor lines and their intersections
         car_x, car_y, car_angle, _ = self.state
-        distances, sensor_intersections = self._compute_sensor_distances()
 
+        # Compute sensor origin at rear axle
+        ox = car_x - math.sin(car_angle) * (self.car_size_height / 2)
+        oy = car_y - math.cos(car_angle) * (self.car_size_height / 2)
+
+        # Draw obstacles
+        for obs in self.obstacles:
+            rect = pyglet.shapes.Rectangle(
+                x=obs['x'] - obs['w']/2,
+                y=obs['y'] - obs['h']/2,
+                width=obs['w'],
+                height=obs['h'],
+                color=(0, 0, 255),
+                batch=self.batch
+            )
+            self.obstacle_shapes.append(rect)
+
+        distances, sensor_intersections = self._compute_sensor_distances()
         for angle_offset, (distance, intersection) in zip(self.sensor_angles, zip(distances, sensor_intersections)):
             # Compute sensor line end point
             sensor_angle = car_angle + angle_offset
-            sensor_x2 = car_x + math.sin(sensor_angle) * distance
-            sensor_y2 = car_y + math.cos(sensor_angle) * distance
+            sensor_x2 = ox + math.sin(sensor_angle) * distance
+            sensor_y2 = oy + math.cos(sensor_angle) * distance
 
             # Create the line for the sensor
             line = pyglet.shapes.Line(
-                car_x, car_y, sensor_x2, sensor_y2, width=1, color=(0, 255, 0), batch=self.batch
+                ox, oy, sensor_x2, sensor_y2, width=1, color=(0, 255, 0), batch=self.batch
             )
             self.sensor_lines.append(line)  # Store the line
 
@@ -425,6 +596,7 @@ class AGVEnvironment:
                     intersect_x, intersect_y, radius=5, color=(255, 0, 0), batch=self.batch
                 )
                 self.sensor_circles.append(circle)
+        self.batch.draw()
 
 
     def close(self):
